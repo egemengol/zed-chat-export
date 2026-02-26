@@ -1,6 +1,6 @@
 [package]
 name = "zed-export-rs"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 edition = "2024"
 
 [dependencies]
@@ -19,3 +19,5 @@ sha2 = "0.10.9"
 url = { version = "2.5.8", features = ["serde"] }
 uuid = { version = "1.21.0", features = ["v4"] }
 zstd = "0.13"
+slug = "0.1"
+indicatif = "0.17"

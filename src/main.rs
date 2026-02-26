@@ -4,6 +4,7 @@ mod importer;
 use crate::importer::{DbThread, SerializedThread};
 use chrono::{DateTime, Utc};
 use eyre::{Context, Result, eyre};
+use indicatif::{ProgressBar, ProgressStyle};
 use rusqlite::{Connection, OpenFlags, backup::Backup};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -157,9 +158,19 @@ fn parse_args() -> Result<Config> {
 }
 
 fn create_snapshot(db_path: &Path, quiet: bool) -> Result<NamedTempFile> {
-    if !quiet {
-        eprintln!("Creating snapshot of database...");
-    }
+    let spinner = if quiet {
+        ProgressBar::hidden()
+    } else {
+        let s = ProgressBar::new_spinner();
+        s.set_style(
+            ProgressStyle::with_template("{spinner:.green} {msg}")
+                .unwrap()
+                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+        );
+        s.set_message("Snapshotting database...");
+        s.enable_steady_tick(Duration::from_millis(80));
+        s
+    };
 
     let src = Connection::open_with_flags(
         db_path,
@@ -179,25 +190,44 @@ fn create_snapshot(db_path: &Path, quiet: bool) -> Result<NamedTempFile> {
     }
 
     drop(src);
+    spinner.finish_and_clear();
     Ok(tmp)
 }
 
-fn allocate_filename(id: &str, registry: &mut HashMap<String, String>) -> String {
+fn allocate_filename(id: &str, title: &str, registry: &mut HashMap<String, String>) -> String {
+    let raw_slug = slug::slugify(title);
+    // Truncate slug to 60 chars (slug output is ASCII-only, so byte == char)
+    let slug = raw_slug[..raw_slug.len().min(60)]
+        .trim_end_matches('-')
+        .to_string();
+
     for &len in &[8usize, 12usize, id.len()] {
         let candidate = &id[..len.min(id.len())];
         match registry.get(candidate) {
             None => {
                 registry.insert(candidate.to_string(), id.to_string());
-                return candidate.to_string();
+                return if slug.is_empty() {
+                    candidate.to_string()
+                } else {
+                    format!("{}_{}", candidate, slug)
+                };
             }
             Some(existing) if existing == id => {
-                return candidate.to_string();
+                return if slug.is_empty() {
+                    candidate.to_string()
+                } else {
+                    format!("{}_{}", candidate, slug)
+                };
             }
             Some(_) => continue,
         }
     }
     // Unreachable: full UUID is always unique per thread
-    id.to_string()
+    if slug.is_empty() {
+        id.to_string()
+    } else {
+        format!("{}_{}", id, slug)
+    }
 }
 
 /// Read just the YAML frontmatter from an existing .md file and extract `updated_at`.
@@ -232,8 +262,40 @@ fn read_file_updated_at(path: &Path) -> Option<DateTime<Utc>> {
     None
 }
 
+/// Cheaply extract `updated_at` from JSON without full deserialization.
+fn get_updated_at(json_bytes: &[u8]) -> Option<DateTime<Utc>> {
+    #[derive(Deserialize)]
+    struct Minimal {
+        updated_at: DateTime<Utc>,
+    }
+    serde_json::from_slice::<Minimal>(json_bytes).ok().map(|m| m.updated_at)
+}
+
+/// Build an in-memory index of existing .md files: prefix → full path.
+/// The prefix is the portion of the filename before the first '_' (or before '.md' if no '_').
+fn build_file_index(target_dir: &Path) -> HashMap<String, PathBuf> {
+    let mut map = HashMap::new();
+    let Ok(entries) = fs::read_dir(target_dir) else {
+        return map;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if !name_str.ends_with(".md") {
+            continue;
+        }
+        let stem = name_str.trim_end_matches(".md");
+        let prefix = stem.split('_').next().unwrap_or(stem).to_string();
+        if !prefix.is_empty() {
+            map.insert(prefix, entry.path());
+        }
+    }
+    map
+}
+
 enum ProcessResult {
-    Written,
+    Created,
+    Updated,
     Skipped,
 }
 
@@ -241,50 +303,93 @@ fn process_thread(
     id: &str,
     data_type: &str,
     raw_data: &[u8],
+    title: &str,
     config: &Config,
     registry: &mut HashMap<String, String>,
+    file_index: &mut HashMap<String, PathBuf>,
+    pb: &ProgressBar,
 ) -> Result<ProcessResult> {
-    let json_bytes: Vec<u8> = match data_type {
-        "zstd" => zstd::decode_all(raw_data).wrap_err("zstd decompression failed")?,
-        "json" => raw_data.to_vec(),
-        other => return Err(eyre!("Unknown data_type: {:?}", other)),
-    };
+    let stem = allocate_filename(id, title, registry);
 
-    let stem = allocate_filename(id, registry);
-    let md_path = config.target_dir.join(format!("{}.md", stem));
+    // Extract prefix (everything before first '_')
+    let prefix = stem.split('_').next().unwrap_or(&stem).to_string();
 
-    // Idempotency check
-    if !config.force && md_path.exists() {
-        // We need the thread's updated_at to compare. Peek at the DB-side timestamp.
-        // We'll deserialize just enough to get it.
-        let db_updated_at = get_updated_at(&json_bytes);
-        if let Some(db_ts) = db_updated_at {
-            if let Some(file_ts) = read_file_updated_at(&md_path) {
-                if file_ts >= db_ts {
-                    return Ok(ProcessResult::Skipped);
+    let desired_path = config.target_dir.join(format!("{}.md", stem));
+    let existing_path = file_index.get(&prefix).cloned();
+
+    // Idempotency check — only decompress/parse if a file exists to compare against
+    let mut cached_json: Option<Vec<u8>> = None;
+    if !config.force {
+        if let Some(ref existing) = existing_path {
+            if let Some(file_ts) = read_file_updated_at(existing) {
+                let json_bytes: Vec<u8> = match data_type {
+                    "zstd" => zstd::decode_all(raw_data).wrap_err("zstd decompression failed")?,
+                    "json" => raw_data.to_vec(),
+                    other => return Err(eyre!("Unknown data_type: {:?}", other)),
+                };
+                if let Some(db_ts) = get_updated_at(&json_bytes) {
+                    if file_ts >= db_ts {
+                        if config.verbose {
+                            pb.println(format!("Skipped:  {}.md", stem));
+                        }
+                        return Ok(ProcessResult::Skipped);
+                    }
                 }
+                cached_json = Some(json_bytes);
             }
         }
     }
 
-    let md_file = File::create(&md_path)
-        .wrap_err_with(|| format!("Failed to create: {}", md_path.display()))?;
+    let json_bytes: Vec<u8> = match cached_json {
+        Some(b) => b,
+        None => match data_type {
+            "zstd" => zstd::decode_all(raw_data).wrap_err("zstd decompression failed")?,
+            "json" => raw_data.to_vec(),
+            other => return Err(eyre!("Unknown data_type: {:?}", other)),
+        },
+    };
+
+    let result_variant = if existing_path.is_none() {
+        ProcessResult::Created
+    } else {
+        ProcessResult::Updated
+    };
+
+    // Rename if slug changed (Scenario C)
+    if let Some(ref existing) = existing_path {
+        if existing != &desired_path {
+            if let Err(e) = fs::rename(existing, &desired_path) {
+                pb.println(format!(
+                    "Warning: could not rename {} → {}: {}",
+                    existing.display(),
+                    desired_path.display(),
+                    e
+                ));
+            }
+        }
+    }
+
+    // Update the index so subsequent lookups reflect the rename
+    file_index.insert(prefix, desired_path.clone());
+
+    let md_file = File::create(&desired_path)
+        .wrap_err_with(|| format!("Failed to create: {}", desired_path.display()))?;
     let mut writer = BufWriter::new(md_file);
 
     let tags = config.tags.as_deref();
 
     let assets = match serde_json::from_slice::<DbThread>(&json_bytes) {
-        Ok(thread) => exporter::write_db_thread_markdown(&mut writer, &stem, &thread, tags)
+        Ok(thread) => exporter::write_db_thread_markdown(&mut writer, id, &stem, &thread, tags)
             .wrap_err("Failed to write DbThread markdown")?,
         Err(_) => match serde_json::from_slice::<SerializedThread>(&json_bytes) {
             Ok(thread) => {
-                exporter::write_serialized_thread_markdown(&mut writer, &thread, tags)
+                exporter::write_serialized_thread_markdown(&mut writer, id, &thread, tags)
                     .wrap_err("Failed to write SerializedThread markdown")?;
                 None
             }
             Err(e) => {
                 drop(writer);
-                let _ = fs::remove_file(&md_path);
+                let _ = fs::remove_file(&desired_path);
                 return Err(eyre!(
                     "Could not deserialize as DbThread or SerializedThread: {}",
                     e
@@ -297,26 +402,23 @@ fn process_thread(
     drop(writer);
 
     if let Some(asset_list) = assets {
+        let assets_dir = config.target_dir.join("assets");
         for asset in asset_list {
-            let asset_path = config.target_dir.join(&asset.name);
+            let asset_path = assets_dir.join(&asset.name);
             fs::write(&asset_path, &asset.data)
                 .wrap_err_with(|| format!("Failed to write asset: {}", asset.name))?;
         }
     }
 
-    Ok(ProcessResult::Written)
-}
-
-/// Cheaply extract `updated_at` from JSON without full deserialization.
-fn get_updated_at(json_bytes: &[u8]) -> Option<DateTime<Utc>> {
-    // Try both thread formats
-    #[derive(Deserialize)]
-    struct Minimal {
-        updated_at: DateTime<Utc>,
+    if config.verbose {
+        match result_variant {
+            ProcessResult::Created => pb.println(format!("Created:  {}.md", stem)),
+            ProcessResult::Updated => pb.println(format!("Updated:  {}.md", stem)),
+            ProcessResult::Skipped => unreachable!(),
+        }
     }
-    serde_json::from_slice::<Minimal>(json_bytes)
-        .ok()
-        .map(|m| m.updated_at)
+
+    Ok(result_variant)
 }
 
 fn run_export(snapshot_path: &Path, config: &Config) -> Result<()> {
@@ -326,57 +428,84 @@ fn run_export(snapshot_path: &Path, config: &Config) -> Result<()> {
             config.target_dir.display()
         )
     })?;
-
-    if !config.quiet {
-        eprintln!("Exporting to: {}", config.target_dir.display());
-    }
+    fs::create_dir_all(config.target_dir.join("assets")).wrap_err("Failed to create assets directory")?;
 
     let conn = Connection::open(snapshot_path).wrap_err("Failed to open snapshot database")?;
 
+    let total: u64 = conn
+        .query_row("SELECT COUNT(*) FROM threads", [], |row| row.get::<_, i64>(0))
+        .wrap_err("Failed to count threads")? as u64;
+
+    let mut file_index = build_file_index(&config.target_dir);
+
+    let pb = if config.quiet {
+        ProgressBar::hidden()
+    } else {
+        let bar = ProgressBar::new(total);
+        bar.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({percent}%)",
+            )
+            .unwrap()
+            .progress_chars("=>-"),
+        );
+        bar.println(format!("Found {} threads.", total));
+        bar
+    };
+
     let mut stmt = conn
-        .prepare("SELECT id, data_type, data FROM threads")
+        .prepare("SELECT id, data_type, data, summary FROM threads ORDER BY updated_at DESC")
         .wrap_err("Failed to prepare query")?;
 
-    let rows: Vec<(String, String, Vec<u8>)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-        .wrap_err("Failed to execute query")?
-        .collect::<rusqlite::Result<_>>()
-        .wrap_err("Failed to collect rows")?;
+    let mut rows = stmt
+        .query([])
+        .wrap_err("Failed to execute query")?;
 
     let mut registry: HashMap<String, String> = HashMap::new();
-    let mut count_written = 0usize;
+    let mut count_created = 0usize;
+    let mut count_updated = 0usize;
     let mut count_skipped = 0usize;
     let mut count_errors = 0usize;
 
-    for (id, data_type, raw_data) in rows {
-        match process_thread(&id, &data_type, &raw_data, config, &mut registry) {
-            Ok(ProcessResult::Written) => {
-                count_written += 1;
-                if config.verbose {
-                    let stem = registry.iter().find(|(_, v)| *v == &id).map(|(k, _)| k.as_str()).unwrap_or(&id);
-                    eprintln!("Written: {}.md", stem);
-                }
-            }
+    while let Some(row) = rows.next().wrap_err("Failed to read row")? {
+        let id: String = row.get(0)?;
+        let data_type: String = row.get(1)?;
+        let raw_data: Vec<u8> = row.get(2)?;
+        let summary: String = row.get(3)?;
+        match process_thread(&id, &data_type, &raw_data, &summary, config, &mut registry, &mut file_index, &pb) {
+            Ok(ProcessResult::Created) => count_created += 1,
+            Ok(ProcessResult::Updated) => count_updated += 1,
             Ok(ProcessResult::Skipped) => {
                 count_skipped += 1;
-                if config.verbose {
-                    eprintln!("Skipped: {}", &id[..8.min(id.len())]);
-                }
+                // Since rows are ordered newest-first, once we skip a thread that's
+                // already up-to-date the rest are also guaranteed up-to-date.
+                // Drain the count and stop early.
+                let remaining = total.saturating_sub(
+                    (count_created + count_updated + count_skipped + count_errors) as u64
+                );
+                count_skipped += remaining as usize;
+                pb.inc(remaining + 1);
+                break;
             }
             Err(e) => {
                 count_errors += 1;
-                if !config.quiet {
-                    eprintln!("Error [{}]: {:#}", &id[..8.min(id.len())], e);
-                }
+                pb.println(format!("Error [{}]: {:#}", &id[..8.min(id.len())], e));
             }
         }
+        pb.inc(1);
     }
 
+    pb.finish_and_clear();
+
     if !config.quiet {
-        eprintln!(
-            "Synced {}, Skipped {}, Errors {}",
-            count_written, count_skipped, count_errors
+        let mut summary = format!(
+            "Done. {} created, {} updated, {} skipped.",
+            count_created, count_updated, count_skipped
         );
+        if count_errors > 0 {
+            summary.push_str(&format!(" Completed with {} error(s).", count_errors));
+        }
+        eprintln!("{}", summary);
     }
 
     Ok(())

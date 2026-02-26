@@ -33,6 +33,7 @@ struct Frontmatter {
     tags: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     git: Option<GitMetadata>,
+    id: String,
 }
 
 #[derive(Serialize)]
@@ -47,6 +48,7 @@ struct GitMetadata {
 }
 pub fn write_db_thread_markdown<W: Write>(
     writer: &mut W,
+    id: &str,
     stem: &str,
     thread: &DbThread,
     tags: Option<&[String]>,
@@ -83,6 +85,7 @@ pub fn write_db_thread_markdown<W: Write>(
             v
         }),
         git: git_info,
+        id: id.to_string(),
     };
 
     // 2. Write Frontmatter
@@ -163,7 +166,7 @@ pub fn write_db_thread_markdown<W: Write>(
                         }
                         UserMessageContent::Image(img) => {
                             if let Some(asset) = image_asset(stem, &img.source) {
-                                writeln!(writer, "![image](./{})", asset.name)?;
+                                writeln!(writer, "![image](./assets/{})", asset.name)?;
                                 assets.push(asset);
                             }
                         }
@@ -197,6 +200,7 @@ pub fn write_db_thread_markdown<W: Write>(
 
 pub fn write_serialized_thread_markdown<W: Write>(
     writer: &mut W,
+    id: &str,
     thread: &SerializedThread,
     tags: Option<&[String]>,
 ) -> std::io::Result<()> {
@@ -231,6 +235,7 @@ pub fn write_serialized_thread_markdown<W: Write>(
             v
         }),
         git: git_info,
+        id: id.to_string(),
     };
 
     writeln!(writer, "---")?;
