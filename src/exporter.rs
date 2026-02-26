@@ -77,7 +77,11 @@ pub fn write_db_thread_markdown<W: Write>(
         title: thread.title.clone(),
         updated_at: thread.updated_at,
         model,
-        tags: tags.map(|t| t.to_vec()),
+        tags: tags.map(|t| {
+            let mut v = t.to_vec();
+            v.sort();
+            v
+        }),
         git: git_info,
     };
 
@@ -221,7 +225,11 @@ pub fn write_serialized_thread_markdown<W: Write>(
         title: thread.summary.clone(),
         updated_at: thread.updated_at,
         model,
-        tags: tags.map(|t| t.to_vec()),
+        tags: tags.map(|t| {
+            let mut v = t.to_vec();
+            v.sort();
+            v
+        }),
         git: git_info,
     };
 
