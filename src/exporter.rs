@@ -126,9 +126,14 @@ pub fn write_db_thread_markdown<W: Write>(
                                 (None, None) => "".to_string(),
                             };
 
-                            writeln!(writer, "```{}", header)?;
-                            writeln!(writer, "{}", content)?;
-                            writeln!(writer, "```")?;
+                            let trimmed = content.trim_start();
+                            if trimmed.starts_with("```") {
+                                writeln!(writer, "{}", content)?;
+                            } else {
+                                writeln!(writer, "```{}", header)?;
+                                writeln!(writer, "{}", content)?;
+                                writeln!(writer, "```")?;
+                            }
                         }
                         _ => {}
                     }
