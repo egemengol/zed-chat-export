@@ -15,11 +15,11 @@ pub struct Asset {
     pub data: Vec<u8>,
 }
 
-fn image_asset(thread_id: &str, b64: &str) -> Option<Asset> {
+fn image_asset(stem: &str, b64: &str) -> Option<Asset> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
     let ext = infer::get(&bytes).map(|t| t.extension()).unwrap_or("bin");
-    let hash = format!("{:.16x}", Sha256::digest(&bytes));
-    let name = format!("{}.{}.{}", thread_id, hash, ext);
+    let hash = format!("{:.6x}", Sha256::digest(&bytes));
+    let name = format!("{}.{}.{}", stem, hash, ext);
     Some(Asset { name, data: bytes })
 }
 
@@ -29,6 +29,8 @@ struct Frontmatter {
     updated_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tags: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     git: Option<GitMetadata>,
 }
@@ -45,8 +47,9 @@ struct GitMetadata {
 }
 pub fn write_db_thread_markdown<W: Write>(
     writer: &mut W,
-    thread_id: &str,
+    stem: &str,
     thread: &DbThread,
+    tags: Option<&[String]>,
 ) -> std::io::Result<Option<Vec<Asset>>> {
     let model = thread
         .model
@@ -73,7 +76,8 @@ pub fn write_db_thread_markdown<W: Write>(
     let fm = Frontmatter {
         title: thread.title.clone(),
         updated_at: thread.updated_at,
-        model: model,
+        model,
+        tags: tags.map(|t| t.to_vec()),
         git: git_info,
     };
 
@@ -154,7 +158,7 @@ pub fn write_db_thread_markdown<W: Write>(
                             }
                         }
                         UserMessageContent::Image(img) => {
-                            if let Some(asset) = image_asset(thread_id, &img.source) {
+                            if let Some(asset) = image_asset(stem, &img.source) {
                                 writeln!(writer, "![image](./{})", asset.name)?;
                                 assets.push(asset);
                             }
@@ -190,6 +194,7 @@ pub fn write_db_thread_markdown<W: Write>(
 pub fn write_serialized_thread_markdown<W: Write>(
     writer: &mut W,
     thread: &SerializedThread,
+    tags: Option<&[String]>,
 ) -> std::io::Result<()> {
     let model = thread
         .model
@@ -216,6 +221,7 @@ pub fn write_serialized_thread_markdown<W: Write>(
         title: thread.summary.clone(),
         updated_at: thread.updated_at,
         model,
+        tags: tags.map(|t| t.to_vec()),
         git: git_info,
     };
 
