@@ -4,9 +4,24 @@ use crate::importer::{
     AgentMessageContent, DbThread, MentionUri, Message, Role, SerializedMessageSegment,
     SerializedThread, UserMessageContent,
 };
+use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::io::Write;
+
+pub struct Asset {
+    pub name: String,
+    pub data: Vec<u8>,
+}
+
+fn image_asset(thread_id: &str, b64: &str) -> Option<Asset> {
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    let ext = infer::get(&bytes).map(|t| t.extension()).unwrap_or("bin");
+    let hash = format!("{:.16x}", Sha256::digest(&bytes));
+    let name = format!("{}.{}.{}", thread_id, hash, ext);
+    Some(Asset { name, data: bytes })
+}
 
 #[derive(Serialize)]
 struct Frontmatter {
@@ -30,8 +45,9 @@ struct GitMetadata {
 }
 pub fn write_db_thread_markdown<W: Write>(
     writer: &mut W,
+    thread_id: &str,
     thread: &DbThread,
-) -> std::io::Result<()> {
+) -> std::io::Result<Option<Vec<Asset>>> {
     let model = thread
         .model
         .as_ref()
@@ -72,6 +88,8 @@ pub fn write_db_thread_markdown<W: Write>(
     write!(writer, "{}", yaml)?;
     writeln!(writer, "---")?;
     writeln!(writer)?;
+
+    let mut assets: Vec<Asset> = Vec::new();
 
     // 3. Write Messages
     for msg in &thread.messages {
@@ -135,7 +153,12 @@ pub fn write_db_thread_markdown<W: Write>(
                                 writeln!(writer, "```")?;
                             }
                         }
-                        _ => {}
+                        UserMessageContent::Image(img) => {
+                            if let Some(asset) = image_asset(thread_id, &img.source) {
+                                writeln!(writer, "![image](./{})", asset.name)?;
+                                assets.push(asset);
+                            }
+                        }
                     }
                 }
                 writeln!(writer)?;
@@ -157,7 +180,11 @@ pub fn write_db_thread_markdown<W: Write>(
         }
     }
 
-    Ok(())
+    Ok(if assets.is_empty() {
+        None
+    } else {
+        Some(assets)
+    })
 }
 
 pub fn write_serialized_thread_markdown<W: Write>(

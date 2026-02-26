@@ -1,7 +1,7 @@
 mod exporter;
 mod importer;
 
-use crate::importer::DbThread;
+use crate::importer::{DbThread, SerializedThread};
 use eyre::{Context, Result};
 use rusqlite::{Connection, params};
 use std::env;
@@ -28,7 +28,7 @@ fn main() -> Result<()> {
     // 4. Query 20 Random Rows
     // We select id, data_type (json/zstd), and the raw blob
     let mut stmt =
-        conn.prepare("SELECT id, data_type, data FROM threads ORDER BY RANDOM() LIMIT 20")?;
+        conn.prepare("SELECT id, data_type, data FROM threads ORDER BY RANDOM() LIMIT 10")?;
 
     let rows = stmt.query_map(params![], |row| {
         let id: String = row.get(0)?;
@@ -61,32 +61,48 @@ fn main() -> Result<()> {
         println!("  -> Wrote JSON: {}", json_path);
 
         // 7. Deserialize and Write Markdown
-        // We attempt to parse into DbThread. If the version is incompatible (e.g. old SerializedThread),
-        // serde will fail, and we just skip the markdown generation for that file.
-        match serde_json::from_slice::<DbThread>(&json_bytes) {
+        // Try DbThread (v0.3.0) first; fall back to SerializedThread (v0.1.0 / v0.2.0).
+        let md_path = format!("scratch/files/{}.md", id);
+        let mut md_file =
+            BufWriter::new(File::create(&md_path).wrap_err("Failed to create MD output file")?);
+
+        let wrote = match serde_json::from_slice::<DbThread>(&json_bytes) {
             Ok(thread) => {
-                let md_path = format!("scratch/files/{}.md", id);
-                let mut md_file = BufWriter::new(
-                    File::create(&md_path).wrap_err("Failed to create MD output file")?,
-                );
-
-                exporter::write_db_thread_markdown(&mut md_file, &thread)?;
-                println!("  -> Wrote Markdown: {}", md_path);
+                if let Some(assets) =
+                    exporter::write_db_thread_markdown(&mut md_file, &id, &thread)?
+                {
+                    for asset in assets {
+                        let asset_path = format!("scratch/files/{}", asset.name);
+                        fs::write(&asset_path, &asset.data).wrap_err("Failed to write asset")?;
+                        println!("  -> Wrote Asset: {}", asset_path);
+                    }
+                }
+                true
             }
-            Err(e) => {
-                // Determine version for better error logging
-                let v_check: Option<serde_json::Value> = serde_json::from_slice(&json_bytes).ok();
-                let version = v_check
-                    .as_ref()
-                    .and_then(|v| v.get("version"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("none");
+            Err(_) => match serde_json::from_slice::<SerializedThread>(&json_bytes) {
+                Ok(thread) => {
+                    exporter::write_serialized_thread_markdown(&mut md_file, &thread)?;
+                    true
+                }
+                Err(e) => {
+                    let v_check: Option<serde_json::Value> =
+                        serde_json::from_slice(&json_bytes).ok();
+                    let version = v_check
+                        .as_ref()
+                        .and_then(|v| v.get("version"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("none");
+                    eprintln!(
+                        "  -> Skipped Markdown: both DbThread and SerializedThread failed (version: {}). Error: {}",
+                        version, e
+                    );
+                    false
+                }
+            },
+        };
 
-                eprintln!(
-                    "  -> Skipped Markdown: Failed to deserialize DbThread (Version: {}). Error: {}",
-                    version, e
-                );
-            }
+        if wrote {
+            println!("  -> Wrote Markdown: {}", md_path);
         }
     }
 
