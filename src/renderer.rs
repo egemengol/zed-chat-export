@@ -96,8 +96,7 @@ pub fn render_thread<W: Write>(
     // serde_yaml usually adds a leading "---", but inside a block it might not.
     // We'll rely on serde_yaml's output but trim the leading "---" if present to control formatting manually
     // or just let serde_yaml handle the body.
-    let yaml = serde_yaml::to_string(&fm)
-        .map_err(std::io::Error::other)?;
+    let yaml = serde_yaml::to_string(&fm).map_err(std::io::Error::other)?;
     // serde_yaml includes the initial "---"
     write!(writer, "{}", yaml)?;
     writeln!(writer, "---")?;
@@ -246,8 +245,7 @@ pub fn render_serialized_thread<W: Write>(
     };
 
     writeln!(writer, "---")?;
-    let yaml = serde_yaml::to_string(&fm)
-        .map_err(std::io::Error::other)?;
+    let yaml = serde_yaml::to_string(&fm).map_err(std::io::Error::other)?;
     write!(writer, "{}", yaml)?;
     writeln!(writer, "---")?;
     writeln!(writer)?;

@@ -12,6 +12,9 @@ keywords = ["zed", "export", "markdown", "llm", "backup"]
 categories = ["command-line-utilities", "text-processing", "database"]
 exclude = [".gitignore"]
 
+[features]
+sequential = ["indicatif"]
+
 [dependencies]
 base64 = "0.22.1"
 dirs = "6"
@@ -29,7 +32,7 @@ url = { version = "2.5.8", features = ["serde"] }
 uuid = { version = "1.21.0", features = ["v4"] }
 zstd = "0.13"
 slug = "0.1"
-indicatif = "0.18"
+indicatif = { version = "0.18", optional = true }
 clap = { version = "4.5.60", features = ["derive"] }
 crossbeam-channel = "0.5.15"
 

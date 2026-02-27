@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::importer::{DbThread, SerializedThread};
 use crate::renderer;
 use crate::utils::{
@@ -102,23 +100,25 @@ fn export_thread(
     let mut cached_json: Option<Vec<u8>> = None;
     if !config.force
         && let Some(ref existing) = existing_path
-            && let Some(fm) = parse_existing_frontmatter(existing) {
-                let json_bytes: Vec<u8> = utils::decompress(data_type, raw_data)
-                    .wrap_err("Failed to decompress data")?;
-                if let Some(db_ts) = extract_json_timestamp(&json_bytes)
-                    && fm.updated_at >= db_ts && fm.include_context == config.include_context {
-                        if config.verbose {
-                            pb.println(format!("Skipped:  {}.md", stem));
-                        }
-                        return Ok(ProcessResult::Skipped);
-                    }
-                cached_json = Some(json_bytes);
+        && let Some(fm) = parse_existing_frontmatter(existing)
+    {
+        let json_bytes: Vec<u8> =
+            utils::decompress(data_type, raw_data).wrap_err("Failed to decompress data")?;
+        if let Some(db_ts) = extract_json_timestamp(&json_bytes)
+            && fm.updated_at >= db_ts
+            && fm.include_context == config.include_context
+        {
+            if config.verbose {
+                pb.println(format!("Skipped:  {}.md", stem));
             }
+            return Ok(ProcessResult::Skipped);
+        }
+        cached_json = Some(json_bytes);
+    }
 
     let json_bytes: Vec<u8> = match cached_json {
         Some(b) => b,
-        None => utils::decompress(data_type, raw_data)
-            .wrap_err("Failed to decompress data")?,
+        None => utils::decompress(data_type, raw_data).wrap_err("Failed to decompress data")?,
     };
 
     let result_variant = if existing_path.is_none() {
@@ -130,14 +130,15 @@ fn export_thread(
     // Rename if slug changed (Scenario C)
     if let Some(ref existing) = existing_path
         && existing != &desired_path
-            && let Err(e) = fs::rename(existing, &desired_path) {
-                pb.println(format!(
-                    "Warning: could not rename {} → {}: {}",
-                    existing.display(),
-                    desired_path.display(),
-                    e
-                ));
-            }
+        && let Err(e) = fs::rename(existing, &desired_path)
+    {
+        pb.println(format!(
+            "Warning: could not rename {} → {}: {}",
+            existing.display(),
+            desired_path.display(),
+            e
+        ));
+    }
 
     // Update the index so subsequent lookups reflect the rename
     file_index.insert(prefix, desired_path.clone());

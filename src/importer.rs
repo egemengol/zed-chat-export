@@ -4,6 +4,7 @@
 ///
 /// Storage format: Zstd-compressed JSON (compression level 3) in a SQLite `threads` table.
 /// Current JSON version: `0.3.0`
+/// Current Zed version: `0.225.9`
 ///
 /// Table schema:
 /// ```sql

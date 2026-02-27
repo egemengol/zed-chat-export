@@ -1,6 +1,7 @@
 mod importer;
 mod parallel;
 mod renderer;
+#[cfg(feature = "sequential")]
 mod sequential;
 mod utils;
 
@@ -11,6 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Export Zed editor AI chat history to Markdown files.
+/// Up to date with 0.225.9
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -128,5 +130,9 @@ fn main() -> Result<()> {
     };
 
     // 6. Run the Business Logic
+    #[cfg(feature = "sequential")]
+    return sequential::execute(config);
+
+    #[cfg(not(feature = "sequential"))]
     parallel::execute(config)
 }

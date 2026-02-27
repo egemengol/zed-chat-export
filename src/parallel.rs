@@ -1,8 +1,7 @@
 use crate::importer::{DbThread, SerializedThread};
 use crate::renderer;
 use crate::utils::{
-    ExportConfig, ProcessResult, decompress, extract_json_timestamp,
-    parse_existing_frontmatter,
+    ExportConfig, ProcessResult, decompress, extract_json_timestamp, parse_existing_frontmatter,
 };
 use crossbeam_channel::{SendTimeoutError, bounded};
 use eyre::{Context, Result, eyre};
@@ -322,17 +321,20 @@ fn export_thread(
     let mut cached_json: Option<Vec<u8>> = None;
     if !config.force
         && let Some(ref existing) = existing_path
-            && let Some(fm) = parse_existing_frontmatter(existing) {
-                let json_bytes = decompress(data_type, raw_data)?;
-                if let Some(db_ts) = extract_json_timestamp(&json_bytes)
-                    && fm.updated_at >= db_ts && fm.include_context == config.include_context {
-                        if config.verbose {
-                            eprintln!("Skipped: {}", id);
-                        }
-                        return Ok(ProcessResult::Skipped);
-                    }
-                cached_json = Some(json_bytes);
+        && let Some(fm) = parse_existing_frontmatter(existing)
+    {
+        let json_bytes = decompress(data_type, raw_data)?;
+        if let Some(db_ts) = extract_json_timestamp(&json_bytes)
+            && fm.updated_at >= db_ts
+            && fm.include_context == config.include_context
+        {
+            if config.verbose {
+                eprintln!("Skipped: {}", id);
             }
+            return Ok(ProcessResult::Skipped);
+        }
+        cached_json = Some(json_bytes);
+    }
 
     let json_bytes = match cached_json {
         Some(b) => b,
@@ -358,14 +360,15 @@ fn export_thread(
 
     if let Some(ref old_path) = existing_path
         && old_path != &desired_path
-            && let Err(e) = fs::rename(old_path, &desired_path) {
-                eprintln!(
-                    "Warning: rename failed {} -> {}: {}",
-                    old_path.display(),
-                    desired_path.display(),
-                    e
-                );
-            }
+        && let Err(e) = fs::rename(old_path, &desired_path)
+    {
+        eprintln!(
+            "Warning: rename failed {} -> {}: {}",
+            old_path.display(),
+            desired_path.display(),
+            e
+        );
+    }
 
     let md_file = File::create(&desired_path)
         .wrap_err_with(|| format!("Failed to create: {}", desired_path.display()))?;
@@ -435,9 +438,10 @@ fn allocate_filename(id: &str, title: &str, target_dir: &Path) -> String {
             Ok(false) => return stem,
             Ok(true) => {
                 if let Some(fm) = parse_existing_frontmatter(&path)
-                    && fm.id.as_deref() == Some(id) {
-                        return stem;
-                    }
+                    && fm.id.as_deref() == Some(id)
+                {
+                    return stem;
+                }
                 // Taken by another id — fall through to try a longer prefix
             }
             Err(_) => return stem,

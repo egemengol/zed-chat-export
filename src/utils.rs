@@ -1,12 +1,9 @@
 use chrono::{DateTime, Utc};
 use eyre::{Context, Result, eyre};
-use rusqlite::{Connection, OpenFlags, backup::Backup};
 use serde::Deserialize;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::time::Duration;
-use tempfile::NamedTempFile;
 
 /// Configuration required to run the export process.
 /// This decouples the logic from how the arguments were parsed (CLI/Config file).
@@ -36,8 +33,11 @@ pub struct FileFrontmatter {
 }
 
 /// Create a read-only backup of the database to a temporary file.
-#[allow(dead_code)]
+#[cfg(feature = "sequential")]
 pub fn backup_database(db_path: &Path, quiet: bool) -> Result<NamedTempFile> {
+    use rusqlite::{Connection, OpenFlags, backup::Backup};
+    use std::time::Duration;
+    use tempfile::NamedTempFile;
     let spinner = if quiet {
         indicatif::ProgressBar::hidden()
     } else {
