@@ -1,6 +1,7 @@
 mod exporter;
 mod importer;
 mod process;
+mod process_par;
 
 use clap::Parser;
 use eyre::{Context, Result, eyre};
@@ -13,7 +14,7 @@ use std::path::{Path, PathBuf};
 #[command(author, version, about, long_about = None)]
 struct Cli {
     /// Directory to export markdown files.
-    /// Defaults to ./zed-export if not set in config.
+    /// Defaults to ./zed-chat-export if not set in config.
     #[arg(value_name = "TARGET_DIR")]
     target_dir: Option<PathBuf>,
 
@@ -126,5 +127,5 @@ fn main() -> Result<()> {
     };
 
     // 6. Run the Business Logic
-    process::run(config)
+    process_par::run(config)
 }

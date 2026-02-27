@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::exporter;
 use crate::importer::{DbThread, SerializedThread};
 use chrono::{DateTime, Utc};
@@ -144,7 +145,10 @@ fn read_file_frontmatter(path: &Path) -> Option<FileFrontmatter> {
         }
     }
 
-    updated_at.map(|ts| FileFrontmatter { updated_at: ts, include_context })
+    updated_at.map(|ts| FileFrontmatter {
+        updated_at: ts,
+        include_context,
+    })
 }
 
 /// Cheaply extract `updated_at` from JSON without full deserialization.
