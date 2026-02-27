@@ -43,8 +43,6 @@ fn open_db(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-// ── Fresh path ────────────────────────────────────────────────────────────────
-
 fn run_fresh(config: &ExportConfig) -> Result<()> {
     let ids: Vec<String> = {
         let conn = open_db(&config.db_path)?;
@@ -142,8 +140,6 @@ fn run_fresh(config: &ExportConfig) -> Result<()> {
 
     Ok(())
 }
-
-// ── Incremental path ──────────────────────────────────────────────────────────
 
 fn run_incremental(config: &ExportConfig) -> Result<()> {
     let ordered_ids: Vec<String> = {
@@ -283,8 +279,6 @@ fn run_incremental(config: &ExportConfig) -> Result<()> {
 
     Ok(())
 }
-
-// ── Shared processing ─────────────────────────────────────────────────────────
 
 // Find a file whose name starts with the first 8 chars of the UUID,
 // then confirm ownership by reading the `id:` field from its frontmatter.

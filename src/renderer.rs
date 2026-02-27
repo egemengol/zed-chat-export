@@ -60,7 +60,6 @@ pub fn render_thread<W: Write>(
         .as_ref()
         .map(|slm| format!("{}/{}", slm.provider, slm.model));
 
-    // Extract Git info from the first worktree snapshot if available
     let git_info = thread
         .initial_project_snapshot
         .as_ref()
@@ -91,7 +90,6 @@ pub fn render_thread<W: Write>(
         include_context,
     };
 
-    // 2. Write Frontmatter
     writeln!(writer, "---")?;
     // serde_yaml usually adds a leading "---", but inside a block it might not.
     // We'll rely on serde_yaml's output but trim the leading "---" if present to control formatting manually
@@ -104,7 +102,6 @@ pub fn render_thread<W: Write>(
 
     let mut assets: Vec<Asset> = Vec::new();
 
-    // 3. Write Messages
     for msg in &thread.messages {
         match msg {
             Message::User(user_msg) => {

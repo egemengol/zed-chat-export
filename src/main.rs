@@ -90,16 +90,13 @@ fn load_file_config(explicit_path: Option<&Path>) -> Result<FileConfig> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // 1. Load config file (CLI path > default path)
     let file_cfg = load_file_config(cli.config.as_deref())?;
 
-    // 2. Resolve target_dir (CLI > Config > Default)
     let target_dir = cli
         .target_dir
         .or(file_cfg.target_dir)
         .unwrap_or_else(|| PathBuf::from("zed-chat-export"));
 
-    // 3. Resolve db_path (CLI > Config > Auto-detect)
     let db_path = cli
         .db
         .or(file_cfg.db_path)
@@ -115,10 +112,8 @@ fn main() -> Result<()> {
         ));
     }
 
-    // 4. Resolve tags (CLI > Config)
     let tags = cli.tags.or(file_cfg.tags);
 
-    // 5. Build the Export Config
     let config = utils::ExportConfig {
         target_dir,
         db_path,
@@ -129,7 +124,6 @@ fn main() -> Result<()> {
         include_context: cli.include_context,
     };
 
-    // 6. Run the Business Logic
     #[cfg(feature = "sequential")]
     return sequential::execute(config);
 

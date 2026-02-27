@@ -21,7 +21,6 @@ pub fn execute(config: ExportConfig) -> Result<()> {
 
 fn allocate_filename(id: &str, title: &str, registry: &mut HashMap<String, String>) -> String {
     let raw_slug = slug::slugify(title);
-    // Truncate slug to 60 chars (slug output is ASCII-only, so byte == char)
     let slug = raw_slug[..raw_slug.len().min(60)]
         .trim_end_matches('-')
         .to_string();
@@ -47,7 +46,6 @@ fn allocate_filename(id: &str, title: &str, registry: &mut HashMap<String, Strin
             Some(_) => continue,
         }
     }
-    // Unreachable: full UUID is always unique per thread
     if slug.is_empty() {
         id.to_string()
     } else {
@@ -90,7 +88,6 @@ fn export_thread(
 ) -> Result<ProcessResult> {
     let stem = allocate_filename(id, title, registry);
 
-    // Extract prefix (everything before first '_')
     let prefix = stem.split('_').next().unwrap_or(&stem).to_string();
 
     let desired_path = config.target_dir.join(format!("{}.md", stem));
@@ -127,7 +124,6 @@ fn export_thread(
         ProcessResult::Updated
     };
 
-    // Rename if slug changed (Scenario C)
     if let Some(ref existing) = existing_path
         && existing != &desired_path
         && let Err(e) = fs::rename(existing, &desired_path)
@@ -140,7 +136,6 @@ fn export_thread(
         ));
     }
 
-    // Update the index so subsequent lookups reflect the rename
     file_index.insert(prefix, desired_path.clone());
 
     let md_file = File::create(&desired_path)
