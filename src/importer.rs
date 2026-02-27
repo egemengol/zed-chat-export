@@ -19,15 +19,10 @@
 ///
 /// Source files:
 /// - `crates/agent/src/db.rs`            – `DbThread`, `DbThreadMetadata`, `SharedThread`, `DataType`
-/// - `crates/agent/src/thread.rs`         – `Message`, `UserMessage`, `UserMessageContent`,
-///                                          `AgentMessage`, `AgentMessageContent`, `SubagentContext`, `PromptId`
-/// - `crates/agent/src/legacy_thread.rs`  – `SerializedThread` (v0.1.0/v0.2.0), `SerializedMessage`,
-///                                          `SerializedMessageSegment`, `SerializedToolUse`,
-///                                          `SerializedToolResult`, `SerializedCrease`,
-///                                          `DetailedSummaryState`, `MessageId`, `SerializedLanguageModel`
+/// - `crates/agent/src/thread.rs`         – `Message`, `UserMessage`, `UserMessageContent`, `AgentMessage`, `AgentMessageContent`, `SubagentContext`, `PromptId`
+/// - `crates/agent/src/legacy_thread.rs`  – `SerializedThread` (v0.1.0/v0.2.0), `SerializedMessage`, `SerializedMessageSegment`, `SerializedToolUse`, `SerializedToolResult`, `SerializedCrease`, `DetailedSummaryState`, `MessageId`, `SerializedLanguageModel`
 /// - `crates/language_model/src/language_model.rs` – `TokenUsage`, `LanguageModelToolUse`, `LanguageModelToolUseId`
-/// - `crates/language_model/src/request.rs`        – `LanguageModelImage`, `LanguageModelToolResult`,
-///                                                    `LanguageModelToolResultContent`
+/// - `crates/language_model/src/request.rs`        – `LanguageModelImage`, `LanguageModelToolResult`, `LanguageModelToolResultContent`
 /// - `crates/language_model/src/role.rs`           – `Role`
 /// - `crates/acp_thread/src/mention.rs`            – `MentionUri`
 /// - `crates/acp_thread/src/connection.rs`         – `UserMessageId`
@@ -72,7 +67,7 @@ pub struct UserMessageId(String);
 
 impl UserMessageId {
     pub fn new() -> Self {
-        Self(Uuid::new_v4().to_string().into())
+        Self(Uuid::new_v4().to_string())
     }
 }
 

@@ -1,72 +1,24 @@
 #![allow(dead_code)]
-use crate::exporter;
+
 use crate::importer::{DbThread, SerializedThread};
-use chrono::{DateTime, Utc};
+use crate::renderer;
+use crate::utils::{
+    self, ExportConfig, ProcessResult, backup_database, extract_json_timestamp,
+    parse_existing_frontmatter,
+};
 use eyre::{Context, Result, eyre};
 use indicatif::{ProgressBar, ProgressStyle};
-use rusqlite::{Connection, OpenFlags, backup::Backup};
-use serde::Deserialize;
+use rusqlite::Connection;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-use tempfile::NamedTempFile;
 
-/// Configuration required to run the export process.
-/// This decouples the logic from how the arguments were parsed (CLI/Config file).
-pub struct ExportConfig {
-    pub target_dir: PathBuf,
-    pub db_path: PathBuf,
-    pub tags: Option<Vec<String>>,
-    pub force: bool,
-    pub verbose: bool,
-    pub quiet: bool,
-    pub include_context: bool,
-}
-
-/// The main entry point for the business logic.
+/// The main entry point for the sequential export logic.
 /// Handles snapshotting, migration, and the export loop.
-pub fn run(config: ExportConfig) -> Result<()> {
-    let snapshot = create_snapshot(&config.db_path, config.quiet)?;
+pub fn execute(config: ExportConfig) -> Result<()> {
+    let snapshot = backup_database(&config.db_path, config.quiet)?;
     run_internal(snapshot.path(), &config)
-}
-
-fn create_snapshot(db_path: &Path, quiet: bool) -> Result<NamedTempFile> {
-    let spinner = if quiet {
-        ProgressBar::hidden()
-    } else {
-        let s = ProgressBar::new_spinner();
-        s.set_style(
-            ProgressStyle::with_template("{spinner:.green} {msg}")
-                .unwrap()
-                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-        );
-        s.set_message("Snapshotting database...");
-        s.enable_steady_tick(Duration::from_millis(80));
-        s
-    };
-
-    let src = Connection::open_with_flags(
-        db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .wrap_err_with(|| format!("Failed to open source database: {}", db_path.display()))?;
-
-    let tmp = NamedTempFile::new().wrap_err("Failed to create temporary file")?;
-    let mut dst =
-        Connection::open(tmp.path()).wrap_err("Failed to open snapshot database connection")?;
-
-    {
-        let backup = Backup::new(&src, &mut dst).wrap_err("Failed to initialize backup")?;
-        backup
-            .run_to_completion(1000, Duration::from_millis(5), None)
-            .wrap_err("Backup did not complete successfully")?;
-    }
-
-    drop(src);
-    spinner.finish_and_clear();
-    Ok(tmp)
 }
 
 fn allocate_filename(id: &str, title: &str, registry: &mut HashMap<String, String>) -> String {
@@ -105,63 +57,6 @@ fn allocate_filename(id: &str, title: &str, registry: &mut HashMap<String, Strin
     }
 }
 
-struct FileFrontmatter {
-    updated_at: DateTime<Utc>,
-    include_context: bool,
-}
-
-/// Read the YAML frontmatter from an existing .md file and extract relevant fields.
-fn read_file_frontmatter(path: &Path) -> Option<FileFrontmatter> {
-    let file = File::open(path).ok()?;
-    let reader = BufReader::new(file);
-    let mut lines = reader.lines();
-
-    // First line must be "---"
-    let first = lines.next()?.ok()?;
-    if first.trim() != "---" {
-        return None;
-    }
-
-    let mut updated_at: Option<DateTime<Utc>> = None;
-    let mut include_context = false;
-    let mut bytes_read = 0usize;
-
-    for line in lines {
-        let line = line.ok()?;
-        bytes_read += line.len() + 1;
-        if bytes_read > 2048 {
-            break;
-        }
-        if line.trim() == "---" {
-            break;
-        }
-        if let Some(rest) = line.strip_prefix("updated_at:") {
-            let val = rest.trim().trim_matches('\'').trim_matches('"');
-            updated_at = DateTime::parse_from_rfc3339(val)
-                .ok()
-                .map(|dt| dt.with_timezone(&Utc));
-        } else if let Some(rest) = line.strip_prefix("include_context:") {
-            include_context = rest.trim() == "true";
-        }
-    }
-
-    updated_at.map(|ts| FileFrontmatter {
-        updated_at: ts,
-        include_context,
-    })
-}
-
-/// Cheaply extract `updated_at` from JSON without full deserialization.
-fn get_updated_at(json_bytes: &[u8]) -> Option<DateTime<Utc>> {
-    #[derive(Deserialize)]
-    struct Minimal {
-        updated_at: DateTime<Utc>,
-    }
-    serde_json::from_slice::<Minimal>(json_bytes)
-        .ok()
-        .map(|m| m.updated_at)
-}
-
 /// Build an in-memory index of existing .md files: prefix → full path.
 /// The prefix is the portion of the filename before the first '_' (or before '.md' if no '_').
 fn build_file_index(target_dir: &Path) -> HashMap<String, PathBuf> {
@@ -184,13 +79,8 @@ fn build_file_index(target_dir: &Path) -> HashMap<String, PathBuf> {
     map
 }
 
-enum ProcessResult {
-    Created,
-    Updated,
-    Skipped,
-}
-
-fn process_thread(
+#[allow(clippy::too_many_arguments)]
+fn export_thread(
     id: &str,
     data_type: &str,
     raw_data: &[u8],
@@ -210,34 +100,25 @@ fn process_thread(
 
     // Idempotency check — only decompress/parse if a file exists to compare against
     let mut cached_json: Option<Vec<u8>> = None;
-    if !config.force {
-        if let Some(ref existing) = existing_path {
-            if let Some(fm) = read_file_frontmatter(existing) {
-                let json_bytes: Vec<u8> = match data_type {
-                    "zstd" => zstd::decode_all(raw_data).wrap_err("zstd decompression failed")?,
-                    "json" => raw_data.to_vec(),
-                    other => return Err(eyre!("Unknown data_type: {:?}", other)),
-                };
-                if let Some(db_ts) = get_updated_at(&json_bytes) {
-                    if fm.updated_at >= db_ts && fm.include_context == config.include_context {
+    if !config.force
+        && let Some(ref existing) = existing_path
+            && let Some(fm) = parse_existing_frontmatter(existing) {
+                let json_bytes: Vec<u8> = utils::decompress(data_type, raw_data)
+                    .wrap_err("Failed to decompress data")?;
+                if let Some(db_ts) = extract_json_timestamp(&json_bytes)
+                    && fm.updated_at >= db_ts && fm.include_context == config.include_context {
                         if config.verbose {
                             pb.println(format!("Skipped:  {}.md", stem));
                         }
                         return Ok(ProcessResult::Skipped);
                     }
-                }
                 cached_json = Some(json_bytes);
             }
-        }
-    }
 
     let json_bytes: Vec<u8> = match cached_json {
         Some(b) => b,
-        None => match data_type {
-            "zstd" => zstd::decode_all(raw_data).wrap_err("zstd decompression failed")?,
-            "json" => raw_data.to_vec(),
-            other => return Err(eyre!("Unknown data_type: {:?}", other)),
-        },
+        None => utils::decompress(data_type, raw_data)
+            .wrap_err("Failed to decompress data")?,
     };
 
     let result_variant = if existing_path.is_none() {
@@ -247,9 +128,9 @@ fn process_thread(
     };
 
     // Rename if slug changed (Scenario C)
-    if let Some(ref existing) = existing_path {
-        if existing != &desired_path {
-            if let Err(e) = fs::rename(existing, &desired_path) {
+    if let Some(ref existing) = existing_path
+        && existing != &desired_path
+            && let Err(e) = fs::rename(existing, &desired_path) {
                 pb.println(format!(
                     "Warning: could not rename {} → {}: {}",
                     existing.display(),
@@ -257,8 +138,6 @@ fn process_thread(
                     e
                 ));
             }
-        }
-    }
 
     // Update the index so subsequent lookups reflect the rename
     file_index.insert(prefix, desired_path.clone());
@@ -270,7 +149,7 @@ fn process_thread(
     let tags = config.tags.as_deref();
 
     let assets = match serde_json::from_slice::<DbThread>(&json_bytes) {
-        Ok(thread) => exporter::write_db_thread_markdown(
+        Ok(thread) => renderer::render_thread(
             &mut writer,
             id,
             &stem,
@@ -281,7 +160,7 @@ fn process_thread(
         .wrap_err("Failed to write DbThread markdown")?,
         Err(_) => match serde_json::from_slice::<SerializedThread>(&json_bytes) {
             Ok(thread) => {
-                exporter::write_serialized_thread_markdown(&mut writer, id, &thread, tags)
+                renderer::render_serialized_thread(&mut writer, id, &thread, tags)
                     .wrap_err("Failed to write SerializedThread markdown")?;
                 None
             }
@@ -371,7 +250,7 @@ fn run_internal(snapshot_path: &Path, config: &ExportConfig) -> Result<()> {
         let data_type: String = row.get(1)?;
         let raw_data: Vec<u8> = row.get(2)?;
         let summary: String = row.get(3)?;
-        match process_thread(
+        match export_thread(
             &id,
             &data_type,
             &raw_data,

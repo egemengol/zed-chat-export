@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::importer::{
     AgentMessageContent, DbThread, MentionUri, Message, Role, SerializedMessageSegment,
     SerializedThread, UserMessageContent,
@@ -48,7 +46,8 @@ struct GitMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     commit: Option<String>,
 }
-pub fn write_db_thread_markdown<W: Write>(
+
+pub fn render_thread<W: Write>(
     writer: &mut W,
     id: &str,
     stem: &str,
@@ -98,7 +97,7 @@ pub fn write_db_thread_markdown<W: Write>(
     // We'll rely on serde_yaml's output but trim the leading "---" if present to control formatting manually
     // or just let serde_yaml handle the body.
     let yaml = serde_yaml::to_string(&fm)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
     // serde_yaml includes the initial "---"
     write!(writer, "{}", yaml)?;
     writeln!(writer, "---")?;
@@ -205,7 +204,7 @@ pub fn write_db_thread_markdown<W: Write>(
     })
 }
 
-pub fn write_serialized_thread_markdown<W: Write>(
+pub fn render_serialized_thread<W: Write>(
     writer: &mut W,
     id: &str,
     thread: &SerializedThread,
@@ -248,7 +247,7 @@ pub fn write_serialized_thread_markdown<W: Write>(
 
     writeln!(writer, "---")?;
     let yaml = serde_yaml::to_string(&fm)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
     write!(writer, "{}", yaml)?;
     writeln!(writer, "---")?;
     writeln!(writer)?;

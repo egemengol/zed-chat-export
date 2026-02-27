@@ -1,7 +1,8 @@
-mod exporter;
 mod importer;
-mod process;
-mod process_par;
+mod parallel;
+mod renderer;
+mod sequential;
+mod utils;
 
 use clap::Parser;
 use eyre::{Context, Result, eyre};
@@ -115,8 +116,8 @@ fn main() -> Result<()> {
     // 4. Resolve tags (CLI > Config)
     let tags = cli.tags.or(file_cfg.tags);
 
-    // 5. Build the Process Config
-    let config = process::ExportConfig {
+    // 5. Build the Export Config
+    let config = utils::ExportConfig {
         target_dir,
         db_path,
         tags,
@@ -127,5 +128,5 @@ fn main() -> Result<()> {
     };
 
     // 6. Run the Business Logic
-    process_par::run(config)
+    parallel::execute(config)
 }

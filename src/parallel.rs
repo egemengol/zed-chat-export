@@ -1,25 +1,19 @@
-use crate::exporter;
 use crate::importer::{DbThread, SerializedThread};
-use crate::process::ExportConfig;
-use chrono::{DateTime, Utc};
+use crate::renderer;
+use crate::utils::{
+    ExportConfig, ProcessResult, decompress, extract_json_timestamp,
+    parse_existing_frontmatter,
+};
 use crossbeam_channel::{SendTimeoutError, bounded};
 use eyre::{Context, Result, eyre};
 use rusqlite::{Connection, OpenFlags};
-use serde::Deserialize;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-#[derive(Clone, Copy)]
-enum ProcessResult {
-    Created,
-    Updated,
-    Skipped,
-}
-
-pub fn run(config: ExportConfig) -> Result<()> {
+pub fn execute(config: ExportConfig) -> Result<()> {
     fs::create_dir_all(&config.target_dir).wrap_err("Failed to create target dir")?;
     fs::create_dir_all(config.target_dir.join("assets")).wrap_err("Failed to create assets dir")?;
 
@@ -84,12 +78,7 @@ fn run_fresh(config: &ExportConfig) -> Result<()> {
                     }
                 };
 
-                loop {
-                    let id = match rx.recv() {
-                        Ok(id) => id,
-                        Err(_) => break,
-                    };
-
+                while let Ok(id) = rx.recv() {
                     let row_result = conn.query_row(
                         "SELECT data_type, data, summary FROM threads WHERE id = ?",
                         [&id],
@@ -104,7 +93,7 @@ fn run_fresh(config: &ExportConfig) -> Result<()> {
 
                     match row_result {
                         Ok((data_type, data, summary)) => {
-                            match process_thread(&id, &data_type, &data, &summary, None, config) {
+                            match export_thread(&id, &data_type, &data, &summary, None, config) {
                                 Ok(ProcessResult::Created) => {
                                     count_created.fetch_add(1, Ordering::Relaxed);
                                 }
@@ -236,7 +225,7 @@ fn run_incremental(config: &ExportConfig) -> Result<()> {
 
                     let existing_path = find_existing_file(&config.target_dir, &id);
 
-                    match process_thread(&id, &data_type, &data, &summary, existing_path, config) {
+                    match export_thread(&id, &data_type, &data, &summary, existing_path, config) {
                         Ok(ProcessResult::Created) => {
                             count_created.fetch_add(1, Ordering::Relaxed);
                         }
@@ -313,7 +302,7 @@ fn find_existing_file(target_dir: &Path, id: &str) -> Option<PathBuf> {
         })
         .find_map(|e| {
             let path = e.path();
-            let fm = read_file_frontmatter(&path)?;
+            let fm = parse_existing_frontmatter(&path)?;
             if fm.id.as_deref() == Some(id) {
                 Some(path)
             } else {
@@ -322,7 +311,7 @@ fn find_existing_file(target_dir: &Path, id: &str) -> Option<PathBuf> {
         })
 }
 
-fn process_thread(
+fn export_thread(
     id: &str,
     data_type: &str,
     raw_data: &[u8],
@@ -331,22 +320,19 @@ fn process_thread(
     config: &ExportConfig,
 ) -> Result<ProcessResult> {
     let mut cached_json: Option<Vec<u8>> = None;
-    if !config.force {
-        if let Some(ref existing) = existing_path {
-            if let Some(fm) = read_file_frontmatter(existing) {
+    if !config.force
+        && let Some(ref existing) = existing_path
+            && let Some(fm) = parse_existing_frontmatter(existing) {
                 let json_bytes = decompress(data_type, raw_data)?;
-                if let Some(db_ts) = get_updated_at(&json_bytes) {
-                    if fm.updated_at >= db_ts && fm.include_context == config.include_context {
+                if let Some(db_ts) = extract_json_timestamp(&json_bytes)
+                    && fm.updated_at >= db_ts && fm.include_context == config.include_context {
                         if config.verbose {
                             eprintln!("Skipped: {}", id);
                         }
                         return Ok(ProcessResult::Skipped);
                     }
-                }
                 cached_json = Some(json_bytes);
             }
-        }
-    }
 
     let json_bytes = match cached_json {
         Some(b) => b,
@@ -370,9 +356,9 @@ fn process_thread(
         ProcessResult::Updated
     };
 
-    if let Some(ref old_path) = existing_path {
-        if old_path != &desired_path {
-            if let Err(e) = fs::rename(old_path, &desired_path) {
+    if let Some(ref old_path) = existing_path
+        && old_path != &desired_path
+            && let Err(e) = fs::rename(old_path, &desired_path) {
                 eprintln!(
                     "Warning: rename failed {} -> {}: {}",
                     old_path.display(),
@@ -380,8 +366,6 @@ fn process_thread(
                     e
                 );
             }
-        }
-    }
 
     let md_file = File::create(&desired_path)
         .wrap_err_with(|| format!("Failed to create: {}", desired_path.display()))?;
@@ -389,7 +373,7 @@ fn process_thread(
     let tags = config.tags.as_deref();
 
     let assets = if let Some(thread) = parsed_db_thread {
-        exporter::write_db_thread_markdown(
+        renderer::render_thread(
             &mut writer,
             id,
             &stem,
@@ -398,7 +382,7 @@ fn process_thread(
             config.include_context,
         )?
     } else if let Some(thread) = parsed_serialized_thread {
-        exporter::write_serialized_thread_markdown(&mut writer, id, &thread, tags)?;
+        renderer::render_serialized_thread(&mut writer, id, &thread, tags)?;
         None
     } else {
         unreachable!()
@@ -426,16 +410,6 @@ fn process_thread(
     Ok(result_variant)
 }
 
-fn decompress(data_type: &str, raw_data: &[u8]) -> Result<Vec<u8>> {
-    match data_type {
-        "zstd" => zstd::decode_all(raw_data).wrap_err("zstd decompression failed"),
-        "json" => Ok(raw_data.to_vec()),
-        other => Err(eyre!("Unknown data_type: {:?}", other)),
-    }
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
 // Optimistically allocate a filename stem for the given id+title pair.
 // For each prefix length [8, 12, full id], we check the filesystem:
 //   - File absent  → claim it (the caller will create it immediately after)
@@ -460,11 +434,10 @@ fn allocate_filename(id: &str, title: &str, target_dir: &Path) -> String {
         match path.try_exists() {
             Ok(false) => return stem,
             Ok(true) => {
-                if let Some(fm) = read_file_frontmatter(&path) {
-                    if fm.id.as_deref() == Some(id) {
+                if let Some(fm) = parse_existing_frontmatter(&path)
+                    && fm.id.as_deref() == Some(id) {
                         return stem;
                     }
-                }
                 // Taken by another id — fall through to try a longer prefix
             }
             Err(_) => return stem,
@@ -477,58 +450,4 @@ fn allocate_filename(id: &str, title: &str, target_dir: &Path) -> String {
     } else {
         format!("{}_{}", id, slug)
     }
-}
-
-struct FileFrontmatter {
-    id: Option<String>,
-    updated_at: DateTime<Utc>,
-    include_context: bool,
-}
-
-fn read_file_frontmatter(path: &Path) -> Option<FileFrontmatter> {
-    let file = File::open(path).ok()?;
-    let reader = BufReader::new(file);
-    let mut lines = reader.lines();
-    let first = lines.next()?.ok()?;
-    if first.trim() != "---" {
-        return None;
-    }
-
-    let mut id: Option<String> = None;
-    let mut updated_at: Option<DateTime<Utc>> = None;
-    let mut include_context = false;
-    let mut bytes_read = 0usize;
-
-    for line in lines {
-        let line = line.ok()?;
-        bytes_read += line.len() + 1;
-        if bytes_read > 2048 || line.trim() == "---" {
-            break;
-        }
-        if let Some(rest) = line.strip_prefix("id:") {
-            id = Some(rest.trim().trim_matches('\'').trim_matches('"').to_string());
-        } else if let Some(rest) = line.strip_prefix("updated_at:") {
-            let val = rest.trim().trim_matches('\'').trim_matches('"');
-            updated_at = DateTime::parse_from_rfc3339(val)
-                .ok()
-                .map(|dt| dt.with_timezone(&Utc));
-        } else if let Some(rest) = line.strip_prefix("include_context:") {
-            include_context = rest.trim() == "true";
-        }
-    }
-    updated_at.map(|ts| FileFrontmatter {
-        id,
-        updated_at: ts,
-        include_context,
-    })
-}
-
-fn get_updated_at(json_bytes: &[u8]) -> Option<DateTime<Utc>> {
-    #[derive(Deserialize)]
-    struct Minimal {
-        updated_at: DateTime<Utc>,
-    }
-    serde_json::from_slice::<Minimal>(json_bytes)
-        .ok()
-        .map(|m| m.updated_at)
 }
