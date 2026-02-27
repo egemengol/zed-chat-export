@@ -4,20 +4,13 @@ use crate::process::ExportConfig;
 use chrono::{DateTime, Utc};
 use crossbeam_channel::{SendTimeoutError, bounded};
 use eyre::{Context, Result, eyre};
-use indicatif::{ProgressBar, ProgressStyle};
 use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
-
-struct GlobalState {
-    registry: HashMap<String, String>,
-}
 
 #[derive(Clone, Copy)]
 enum ProcessResult {
@@ -57,32 +50,6 @@ fn open_db(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-fn make_bar(total: Option<u64>, quiet: bool) -> ProgressBar {
-    if quiet {
-        return ProgressBar::hidden();
-    }
-    match total {
-        Some(n) => {
-            let bar = ProgressBar::new(n);
-            bar.set_style(
-                ProgressStyle::with_template(
-                    "{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}",
-                )
-                .unwrap()
-                .progress_chars("=>-"),
-            );
-            bar
-        }
-        None => {
-            let s = ProgressBar::new_spinner();
-            s.set_style(ProgressStyle::default_spinner());
-            s.set_message("Exporting...");
-            s.enable_steady_tick(Duration::from_millis(80));
-            s
-        }
-    }
-}
-
 // ── Fresh path ────────────────────────────────────────────────────────────────
 
 fn run_fresh(config: &ExportConfig) -> Result<()> {
@@ -96,29 +63,23 @@ fn run_fresh(config: &ExportConfig) -> Result<()> {
             .wrap_err("Failed to collect ids")?
     };
 
-    let state = Mutex::new(GlobalState {
-        registry: HashMap::new(),
-    });
-    let pb = make_bar(Some(ids.len() as u64), config.quiet);
-
     let (tx, rx) = bounded::<String>(512);
     let count_created = AtomicUsize::new(0);
     let count_errors = AtomicUsize::new(0);
     let n_workers = std::thread::available_parallelism()
-        .map(|n| n.get() * 2)
+        .map(|n| n.get())
         .unwrap_or(8);
 
     std::thread::scope(|s| {
         for _ in 0..n_workers {
             let rx = rx.clone();
-            let (config, state, pb) = (&config, &state, &pb);
-            let (count_created, count_errors) = (&count_created, &count_errors);
+            let (config, count_created, count_errors) = (&config, &count_created, &count_errors);
 
             s.spawn(move || {
                 let conn = match open_db(&config.db_path) {
                     Ok(c) => c,
                     Err(e) => {
-                        pb.println(format!("Worker DB open failed: {:#}", e));
+                        eprintln!("Worker DB open failed: {:#}", e);
                         return;
                     }
                 };
@@ -143,33 +104,22 @@ fn run_fresh(config: &ExportConfig) -> Result<()> {
 
                     match row_result {
                         Ok((data_type, data, summary)) => {
-                            match process_thread(
-                                &id, &data_type, &data, &summary, None, config, state, pb,
-                            ) {
+                            match process_thread(&id, &data_type, &data, &summary, None, config) {
                                 Ok(ProcessResult::Created) => {
                                     count_created.fetch_add(1, Ordering::Relaxed);
                                 }
                                 Ok(_) => {}
                                 Err(e) => {
                                     count_errors.fetch_add(1, Ordering::Relaxed);
-                                    pb.println(format!(
-                                        "Error [{}]: {:#}",
-                                        &id[..8.min(id.len())],
-                                        e
-                                    ));
+                                    eprintln!("Error [{}]: {:#}", &id[..8.min(id.len())], e);
                                 }
                             }
                         }
                         Err(e) => {
                             count_errors.fetch_add(1, Ordering::Relaxed);
-                            pb.println(format!(
-                                "Error fetching [{}]: {:#}",
-                                &id[..8.min(id.len())],
-                                e
-                            ));
+                            eprintln!("Error fetching [{}]: {:#}", &id[..8.min(id.len())], e);
                         }
                     }
-                    pb.inc(1);
                 }
             });
         }
@@ -193,8 +143,6 @@ fn run_fresh(config: &ExportConfig) -> Result<()> {
         Ok::<_, eyre::Error>(())
     })
     .wrap_err("Fresh pipeline failed")?;
-
-    pb.finish_and_clear();
 
     if !config.quiet {
         eprintln!(
@@ -220,27 +168,21 @@ fn run_incremental(config: &ExportConfig) -> Result<()> {
             .wrap_err("Failed to collect ids")?
     };
 
-    let total = ordered_ids.len() as u64;
-    let state = Mutex::new(GlobalState {
-        registry: HashMap::new(),
-    });
-    let pb = make_bar(Some(total), config.quiet);
-
-    let (tx, rx) = bounded::<String>(64);
+    let (tx, rx) = bounded::<String>(32);
     let count_created = AtomicUsize::new(0);
     let count_updated = AtomicUsize::new(0);
     let count_skipped = AtomicUsize::new(0);
     let count_errors = AtomicUsize::new(0);
     let should_stop = AtomicBool::new(false);
     let n_workers = std::thread::available_parallelism()
-        .map(|n| n.get() * 2)
+        .map(|n| n.get())
         .unwrap_or(8);
 
     std::thread::scope(|s| {
         for _ in 0..n_workers {
             let rx = rx.clone();
-            let (config, state, pb) = (&config, &state, &pb);
-            let (count_created, count_updated, count_skipped, count_errors) = (
+            let (config, count_created, count_updated, count_skipped, count_errors) = (
+                &config,
                 &count_created,
                 &count_updated,
                 &count_skipped,
@@ -252,7 +194,7 @@ fn run_incremental(config: &ExportConfig) -> Result<()> {
                 let conn = match open_db(&config.db_path) {
                     Ok(c) => c,
                     Err(e) => {
-                        pb.println(format!("Worker DB open failed: {:#}", e));
+                        eprintln!("Worker DB open failed: {:#}", e);
                         return;
                     }
                 };
@@ -287,28 +229,14 @@ fn run_incremental(config: &ExportConfig) -> Result<()> {
                         Ok(r) => r,
                         Err(e) => {
                             count_errors.fetch_add(1, Ordering::Relaxed);
-                            pb.println(format!(
-                                "Error fetching [{}]: {:#}",
-                                &id[..8.min(id.len())],
-                                e
-                            ));
-                            pb.inc(1);
+                            eprintln!("Error fetching [{}]: {:#}", &id[..8.min(id.len())], e);
                             continue;
                         }
                     };
 
                     let existing_path = find_existing_file(&config.target_dir, &id);
 
-                    match process_thread(
-                        &id,
-                        &data_type,
-                        &data,
-                        &summary,
-                        existing_path,
-                        config,
-                        state,
-                        pb,
-                    ) {
+                    match process_thread(&id, &data_type, &data, &summary, existing_path, config) {
                         Ok(ProcessResult::Created) => {
                             count_created.fetch_add(1, Ordering::Relaxed);
                         }
@@ -317,16 +245,14 @@ fn run_incremental(config: &ExportConfig) -> Result<()> {
                         }
                         Ok(ProcessResult::Skipped) => {
                             count_skipped.fetch_add(1, Ordering::Relaxed);
-                            pb.inc(1);
                             should_stop.store(true, Ordering::Relaxed);
                             break;
                         }
                         Err(e) => {
                             count_errors.fetch_add(1, Ordering::Relaxed);
-                            pb.println(format!("Error [{}]: {:#}", &id[..8.min(id.len())], e));
+                            eprintln!("Error [{}]: {:#}", &id[..8.min(id.len())], e);
                         }
                     }
-                    pb.inc(1);
                 }
             });
         }
@@ -356,8 +282,6 @@ fn run_incremental(config: &ExportConfig) -> Result<()> {
         Ok::<_, eyre::Error>(())
     })
     .wrap_err("Incremental pipeline failed")?;
-
-    pb.finish_and_clear();
 
     if !config.quiet {
         eprintln!(
@@ -405,8 +329,6 @@ fn process_thread(
     title: &str,
     existing_path: Option<PathBuf>,
     config: &ExportConfig,
-    state: &Mutex<GlobalState>,
-    pb: &ProgressBar,
 ) -> Result<ProcessResult> {
     let mut cached_json: Option<Vec<u8>> = None;
     if !config.force {
@@ -416,7 +338,7 @@ fn process_thread(
                 if let Some(db_ts) = get_updated_at(&json_bytes) {
                     if fm.updated_at >= db_ts && fm.include_context == config.include_context {
                         if config.verbose {
-                            pb.println(format!("Skipped: {}", id));
+                            eprintln!("Skipped: {}", id);
                         }
                         return Ok(ProcessResult::Skipped);
                     }
@@ -440,27 +362,23 @@ fn process_thread(
             },
         };
 
-    let (stem, desired_path, result_variant) = {
-        let mut guard = state.lock().unwrap();
-        let stem = allocate_filename(id, title, &mut guard.registry);
-        let desired = config.target_dir.join(format!("{}.md", stem));
-        let variant = if existing_path.is_none() {
-            ProcessResult::Created
-        } else {
-            ProcessResult::Updated
-        };
-        (stem, desired, variant)
+    let stem = allocate_filename(id, title, &config.target_dir);
+    let desired_path = config.target_dir.join(format!("{}.md", stem));
+    let result_variant = if existing_path.is_none() {
+        ProcessResult::Created
+    } else {
+        ProcessResult::Updated
     };
 
     if let Some(ref old_path) = existing_path {
         if old_path != &desired_path {
             if let Err(e) = fs::rename(old_path, &desired_path) {
-                pb.println(format!(
+                eprintln!(
                     "Warning: rename failed {} -> {}: {}",
                     old_path.display(),
                     desired_path.display(),
                     e
-                ));
+                );
             }
         }
     }
@@ -499,8 +417,8 @@ fn process_thread(
 
     if config.verbose {
         match result_variant {
-            ProcessResult::Created => pb.println(format!("Created: {}.md", stem)),
-            ProcessResult::Updated => pb.println(format!("Updated: {}.md", stem)),
+            ProcessResult::Created => eprintln!("Created: {}.md", stem),
+            ProcessResult::Updated => eprintln!("Updated: {}.md", stem),
             ProcessResult::Skipped => {}
         }
     }
@@ -518,33 +436,42 @@ fn decompress(data_type: &str, raw_data: &[u8]) -> Result<Vec<u8>> {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn allocate_filename(id: &str, title: &str, registry: &mut HashMap<String, String>) -> String {
+// Optimistically allocate a filename stem for the given id+title pair.
+// For each prefix length [8, 12, full id], we check the filesystem:
+//   - File absent  → claim it (the caller will create it immediately after)
+//   - File present and owned by this id → reuse it (incremental update / slug unchanged)
+//   - File present and owned by another id → try a longer prefix
+// No shared lock is needed. The only race is two threads simultaneously claiming
+// the same 8-char UUID prefix for *different* IDs — astronomically rare in practice.
+fn allocate_filename(id: &str, title: &str, target_dir: &Path) -> String {
     let raw_slug = slug::slugify(title);
     let slug = raw_slug[..raw_slug.len().min(60)]
         .trim_end_matches('-')
         .to_string();
 
     for &len in &[8usize, 12usize, id.len()] {
-        let candidate = &id[..len.min(id.len())];
-        match registry.get(candidate) {
-            None => {
-                registry.insert(candidate.to_string(), id.to_string());
-                return if slug.is_empty() {
-                    candidate.to_string()
-                } else {
-                    format!("{}_{}", candidate, slug)
-                };
+        let prefix = &id[..len.min(id.len())];
+        let stem = if slug.is_empty() {
+            prefix.to_string()
+        } else {
+            format!("{}_{}", prefix, slug)
+        };
+        let path = target_dir.join(format!("{}.md", stem));
+        match path.try_exists() {
+            Ok(false) => return stem,
+            Ok(true) => {
+                if let Some(fm) = read_file_frontmatter(&path) {
+                    if fm.id.as_deref() == Some(id) {
+                        return stem;
+                    }
+                }
+                // Taken by another id — fall through to try a longer prefix
             }
-            Some(existing) if existing == id => {
-                return if slug.is_empty() {
-                    candidate.to_string()
-                } else {
-                    format!("{}_{}", candidate, slug)
-                };
-            }
-            Some(_) => continue,
+            Err(_) => return stem,
         }
     }
+
+    // Full-id fallback; a UUID is unique so this is always safe
     if slug.is_empty() {
         id.to_string()
     } else {
