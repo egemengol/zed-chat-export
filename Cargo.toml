@@ -1,12 +1,16 @@
 [package]
-name = "zed-export-rs"
-version = "1.0.0-rc.1"
+name = "zed-chat-export"
+version = "0.1.0"
 edition = "2024"
-description = "A CLI tool to export Zed editor conversations to Markdown files."
+description = "Export your Zed editor AI chat history to Markdown files for archiving and LLM context."
 repository = "https://github.com/egemengol/zed-export-rs"
-license = "MIT"
-keywords = ["zed", "export", "markdown", "llm", "cli"]
-categories = ["command-line-utilities", "text-processing"]
+homepage = "https://github.com/egemengol/zed-export-rs"
+authors = ["Egemen Göl <egemengol@gmail.com>"]
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+keywords = ["zed", "export", "markdown", "llm", "backup"]
+categories = ["command-line-utilities", "text-processing", "database"]
+exclude = [".gitignore"]
 
 [dependencies]
 base64 = "0.22.1"
@@ -26,6 +30,7 @@ uuid = { version = "1.21.0", features = ["v4"] }
 zstd = "0.13"
 slug = "0.1"
 indicatif = "0.18"
+clap = { version = "4.5.60", features = ["derive"] }
 
 # Optimize for binary size and speed
 [profile.release]
@@ -33,3 +38,4 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+opt-level = "z"
