@@ -3,14 +3,15 @@ name = "zed-chat-export"
 version = "0.1.0"
 edition = "2024"
 description = "Export your Zed editor AI chat history to Markdown files for archiving and LLM context."
-repository = "https://github.com/egemengol/zed-export-rs"
-homepage = "https://github.com/egemengol/zed-export-rs"
+repository = "https://github.com/egemengol/zed-chat-export"
+homepage = "https://github.com/egemengol/zed-chat-export"
 authors = ["Egemen Göl <egemengol@gmail.com>"]
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 keywords = ["zed", "export", "markdown", "llm", "backup"]
 categories = ["command-line-utilities", "text-processing", "database"]
-exclude = [".gitignore"]
+include = ["src/**/*", "LICENSE", "README.md", "Cargo.toml"]
+rust-version = "1.89.0"
 
 [features]
 sequential = ["indicatif"]
@@ -36,7 +37,6 @@ indicatif = { version = "0.18", optional = true }
 clap = { version = "4.5.60", features = ["derive"] }
 crossbeam-channel = "0.5.15"
 
-# Optimize for binary size and speed
 [profile.release]
 lto = true
 codegen-units = 1
