@@ -34,6 +34,8 @@ struct Frontmatter {
     #[serde(skip_serializing_if = "Option::is_none")]
     git: Option<GitMetadata>,
     id: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    include_context: bool,
 }
 
 #[derive(Serialize)]
@@ -52,6 +54,7 @@ pub fn write_db_thread_markdown<W: Write>(
     stem: &str,
     thread: &DbThread,
     tags: Option<&[String]>,
+    include_context: bool,
 ) -> std::io::Result<Option<Vec<Asset>>> {
     let model = thread
         .model
@@ -86,6 +89,7 @@ pub fn write_db_thread_markdown<W: Write>(
         }),
         git: git_info,
         id: id.to_string(),
+        include_context,
     };
 
     // 2. Write Frontmatter
@@ -114,6 +118,9 @@ pub fn write_db_thread_markdown<W: Write>(
                             writeln!(writer, "{}", text)?;
                         }
                         UserMessageContent::Mention { uri, content } => {
+                            if !include_context {
+                                continue;
+                            }
                             let (path_str, lang_ext) = match uri {
                                 MentionUri::File { abs_path } => (
                                     Some(abs_path.to_string_lossy().to_string()),
@@ -236,6 +243,7 @@ pub fn write_serialized_thread_markdown<W: Write>(
         }),
         git: git_info,
         id: id.to_string(),
+        include_context: false,
     };
 
     writeln!(writer, "---")?;

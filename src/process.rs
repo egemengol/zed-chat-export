@@ -21,6 +21,7 @@ pub struct ExportConfig {
     pub force: bool,
     pub verbose: bool,
     pub quiet: bool,
+    pub include_context: bool,
 }
 
 /// The main entry point for the business logic.
@@ -103,8 +104,13 @@ fn allocate_filename(id: &str, title: &str, registry: &mut HashMap<String, Strin
     }
 }
 
-/// Read just the YAML frontmatter from an existing .md file and extract `updated_at`.
-fn read_file_updated_at(path: &Path) -> Option<DateTime<Utc>> {
+struct FileFrontmatter {
+    updated_at: DateTime<Utc>,
+    include_context: bool,
+}
+
+/// Read the YAML frontmatter from an existing .md file and extract relevant fields.
+fn read_file_frontmatter(path: &Path) -> Option<FileFrontmatter> {
     let file = File::open(path).ok()?;
     let reader = BufReader::new(file);
     let mut lines = reader.lines();
@@ -115,7 +121,10 @@ fn read_file_updated_at(path: &Path) -> Option<DateTime<Utc>> {
         return None;
     }
 
+    let mut updated_at: Option<DateTime<Utc>> = None;
+    let mut include_context = false;
     let mut bytes_read = 0usize;
+
     for line in lines {
         let line = line.ok()?;
         bytes_read += line.len() + 1;
@@ -127,12 +136,15 @@ fn read_file_updated_at(path: &Path) -> Option<DateTime<Utc>> {
         }
         if let Some(rest) = line.strip_prefix("updated_at:") {
             let val = rest.trim().trim_matches('\'').trim_matches('"');
-            return DateTime::parse_from_rfc3339(val)
+            updated_at = DateTime::parse_from_rfc3339(val)
                 .ok()
                 .map(|dt| dt.with_timezone(&Utc));
+        } else if let Some(rest) = line.strip_prefix("include_context:") {
+            include_context = rest.trim() == "true";
         }
     }
-    None
+
+    updated_at.map(|ts| FileFrontmatter { updated_at: ts, include_context })
 }
 
 /// Cheaply extract `updated_at` from JSON without full deserialization.
@@ -196,14 +208,14 @@ fn process_thread(
     let mut cached_json: Option<Vec<u8>> = None;
     if !config.force {
         if let Some(ref existing) = existing_path {
-            if let Some(file_ts) = read_file_updated_at(existing) {
+            if let Some(fm) = read_file_frontmatter(existing) {
                 let json_bytes: Vec<u8> = match data_type {
                     "zstd" => zstd::decode_all(raw_data).wrap_err("zstd decompression failed")?,
                     "json" => raw_data.to_vec(),
                     other => return Err(eyre!("Unknown data_type: {:?}", other)),
                 };
                 if let Some(db_ts) = get_updated_at(&json_bytes) {
-                    if file_ts >= db_ts {
+                    if fm.updated_at >= db_ts && fm.include_context == config.include_context {
                         if config.verbose {
                             pb.println(format!("Skipped:  {}.md", stem));
                         }
@@ -254,8 +266,15 @@ fn process_thread(
     let tags = config.tags.as_deref();
 
     let assets = match serde_json::from_slice::<DbThread>(&json_bytes) {
-        Ok(thread) => exporter::write_db_thread_markdown(&mut writer, id, &stem, &thread, tags)
-            .wrap_err("Failed to write DbThread markdown")?,
+        Ok(thread) => exporter::write_db_thread_markdown(
+            &mut writer,
+            id,
+            &stem,
+            &thread,
+            tags,
+            config.include_context,
+        )
+        .wrap_err("Failed to write DbThread markdown")?,
         Err(_) => match serde_json::from_slice::<SerializedThread>(&json_bytes) {
             Ok(thread) => {
                 exporter::write_serialized_thread_markdown(&mut writer, id, &thread, tags)

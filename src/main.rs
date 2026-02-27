@@ -42,6 +42,10 @@ struct Cli {
     /// Suppress standard output (progress bars).
     #[arg(short, long)]
     quiet: bool,
+
+    /// Include @-mention context blocks (file, symbol, selection, etc.) in output.
+    #[arg(long)]
+    include_context: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -64,7 +68,7 @@ fn load_file_config(explicit_path: Option<&Path>) -> Result<FileConfig> {
     } else {
         // Search: XDG/OS config dir, then nothing
         dirs::config_dir()
-            .map(|d| d.join("zed-export/config.toml"))
+            .map(|d| d.join("zed-chat-export/config.toml"))
             .filter(|p| p.exists())
     };
 
@@ -118,6 +122,7 @@ fn main() -> Result<()> {
         force: cli.force,
         verbose: cli.verbose,
         quiet: cli.quiet,
+        include_context: cli.include_context,
     };
 
     // 6. Run the Business Logic
