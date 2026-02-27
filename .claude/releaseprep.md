@@ -42,6 +42,11 @@ This is the most critical deliverable. Needs:
 - Contributing section
 - License badge + license section
 
+- we left the following features to later
+  - watch
+  - redacted
+  - vacuuming of ghost conversations
+
 ### 3. Changelog
 
 - `CHANGELOG.md` following [Keep a Changelog](https://keepachangelog.com/) format
