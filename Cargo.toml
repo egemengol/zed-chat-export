@@ -1,6 +1,6 @@
 [package]
 name = "zed-chat-export"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Export your Zed editor AI chat history to Markdown files for archiving and LLM context."
 repository = "https://github.com/egemengol/zed-chat-export"
