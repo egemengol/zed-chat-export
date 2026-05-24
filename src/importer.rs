@@ -333,14 +333,50 @@ fn parse_lm_image(obj: &serde_json::Map<String, serde_json::Value>) -> Option<La
 /// The result of a tool invocation, associated with a specific tool use ID.
 ///
 /// Source: `crates/language_model/src/request.rs`
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct LanguageModelToolResult {
     pub tool_use_id: LanguageModelToolUseId,
     pub tool_name: String,
     pub is_error: bool,
-    pub content: LanguageModelToolResultContent,
+    pub content: Vec<LanguageModelToolResultContent>,
     /// Optional structured output (debug/display purposes).
     pub output: Option<serde_json::Value>,
+}
+
+impl<'de> Deserialize<'de> for LanguageModelToolResult {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+
+        #[derive(Deserialize)]
+        struct RawResult {
+            pub tool_use_id: LanguageModelToolUseId,
+            pub tool_name: String,
+            pub is_error: bool,
+            pub content: serde_json::Value,
+            pub output: Option<serde_json::Value>,
+        }
+
+        let raw = RawResult::deserialize(deserializer)?;
+        let content = if raw.content.is_array() {
+            // New format (found in newer Zed versions): content is an array of objects.
+            serde_json::from_value::<Vec<LanguageModelToolResultContent>>(raw.content)
+                .map_err(D::Error::custom)?
+        } else {
+            // Old format (found in older threads): content is a single object.
+            // Wrap it in a Vec to match the updated internal struct.
+            let single = serde_json::from_value::<LanguageModelToolResultContent>(raw.content)
+                .map_err(D::Error::custom)?;
+            vec![single]
+        };
+
+        Ok(Self {
+            tool_use_id: raw.tool_use_id,
+            tool_name: raw.tool_name,
+            is_error: raw.is_error,
+            content,
+            output: raw.output,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
